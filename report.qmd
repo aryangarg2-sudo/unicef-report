@@ -1,0 +1,201 @@
+---
+title: "The Silent Crisis: Child and Youth Deaths Worldwide"
+author: "Aryan Garg"
+date: today
+format:
+  html:
+    embed-resources: true
+    code-fold: true
+    theme: cosmo
+    smooth-scroll: true
+    toc: true
+    toc-depth: 2
+execute:
+  warning: false
+  echo: true
+---
+
+## Introduction
+
+Every year, **millions of children and young people** aged 5–24 die from 
+preventable causes. This report explores the relationship between 
+*early childhood care*, *GDP per capita*, and *youth mortality* 
+across the world.
+
+Key questions we explore:
+
+- Which regions have the highest youth deaths?
+- Does a country's wealth affect child survival?
+- How has the situation changed over time?
+
+```{python}
+#| label: load-data
+#| echo: true
+
+import polars as pl
+import pandas as pd
+
+# Load the three data files
+indicator1 = pl.read_csv("unicef_indicator_1.csv")
+indicator2 = pl.read_csv("unicef_indicator_2.csv")
+metadata = pl.read_csv("unicef_metadata.csv")
+
+# Filter indicator1 to Total sex only (removes Male/Female duplicates)
+ind1_total = indicator1.filter(pl.col("sex") == "Total")
+
+# Filter indicator2 to Total sex only
+ind2_total = indicator2.filter(pl.col("sex") == "Total")
+
+# Merge indicator2 with metadata using country name
+merged = ind2_total.join(
+    metadata.select(["country", "year", "GDP per capita (constant 2015 US$)", 
+                     "Life expectancy at birth, total (years)"]),
+    left_on=["country", "time_period"],
+    right_on=["country", "year"],
+    how="left"
+)
+
+print(ind1_total.head(3))
+print(ind2_total.head(3))
+```
+
+```{python}
+#| label: fig-world-map
+#| fig-cap: "Percentage of children receiving early stimulation by country"
+#| warning: false
+
+import geopandas as gpd
+from plotnine import *
+import pandas as pd
+import polars as pl
+
+# Convert to pandas for geopandas merge
+ind1_pd = ind1_total.to_pandas()
+
+# Load world shapefile (built into geopandas)
+world = gpd.read_file("https://naciscdn.org/naturalearth/110m/cultural/ne_110m_admin_0_countries.zip")
+# Merge map data with indicator data
+world_merged = world.merge(
+    ind1_pd[["alpha_3_code","obs_value"]],
+    left_on="ISO_A3_EH",
+    right_on="alpha_3_code",
+    how="left"
+)
+
+# Plot the map
+(
+  ggplot(world_merged)
+  + geom_map(aes(fill="obs_value"), color="white", size=0.2)
+  + scale_fill_gradient(low="#FAECE7", high="#1e59d0", na_value="#79e8db",
+                        name="% children\nwith care")
+  + coord_equal()
+  + theme_void()
+  + theme(figure_size=(10, 5),
+          plot_title=element_text(size=12, weight="bold"),
+          legend_position="right")
+  + labs(title="Early Childhood Care Coverage Worldwide")
+)
+```
+
+## Where Are Youth Deaths Concentrated?
+Improving early childhood care can save lives. The map above shows the percentage of children receiving early stimulation. But where are youth deaths most concentrated? The bar chart below highlights the top 10 countries with the highest youth deaths (ages 5–24) in the most recent year available.
+
+```{python}
+#| label: fig-bar-chart
+#| fig-cap: "Top 10 countries by youth deaths (ages 5–24), most recent year"
+
+# Get most recent year per country, sum male+female
+recent = (
+    ind2_total
+    .filter(pl.col("sex") == "Total")
+    .group_by("country")
+    .agg(pl.col("obs_value").last().alias("deaths"),
+         pl.col("time_period").last().alias("year"))
+    .sort("deaths", descending=True)
+    .head(10)
+    .to_pandas()
+)
+
+(
+  ggplot(recent, aes(x="reorder(country, deaths)", y="deaths", fill="deaths"))
+  + geom_bar(stat="identity", show_legend=False)
+  + coord_flip()
+  + scale_fill_gradient(low="#9FE1CB", high="#0F6E56")
+  + scale_y_continuous(labels=lambda l: [f"{v/1000:.0f}k" for v in l])
+  + theme_minimal()
+  + theme(figure_size=(8, 5),
+          axis_title=element_text(size=10),
+          plot_title=element_text(size=12, weight="bold"))
+  + labs(title="Top 10 Countries: Youth Deaths (Ages 5–24)",
+         x="Country", y="Number of Deaths")
+)
+```
+
+## Wealth and Child Survival
+
+Richer countries tend to have better healthcare. The chart below 
+explores whether **GDP per capita** predicts youth deaths.
+
+```{python}
+#| label: fig-scatter
+#| fig-cap: "GDP per capita vs youth deaths — with regression line"
+
+scatter_df = (
+    merged
+    .filter(
+        pl.col("GDP per capita (constant 2015 US$)").is_not_null() &
+        pl.col("obs_value").is_not_null()
+    )
+    .group_by("country")
+    .agg([
+        pl.col("GDP per capita (constant 2015 US$)").mean().alias("gdp"),
+        pl.col("obs_value").mean().alias("deaths")
+    ])
+    .to_pandas()
+)
+
+(
+  ggplot(scatter_df, aes(x="gdp", y="deaths"))
+  + geom_point(color="#185FA5", alpha=0.5, size=2)
+  + geom_smooth(method="lm", color="#D85A30", se=True)
+  + scale_x_log10(labels=lambda l: [f"${v/1000:.0f}k" for v in l])
+  + scale_y_continuous(labels=lambda l: [f"{v/1000:.0f}k" for v in l])
+  + theme_minimal()
+  + theme(figure_size=(8, 5),
+          plot_title=element_text(size=12, weight="bold"))
+  + labs(title="Higher GDP Is Associated with Fewer Youth Deaths",
+         x="GDP per capita (log scale, constant 2015 USD)",
+         y="Average youth deaths (ages 5–24)")
+)
+```
+
+## Progress Over Time
+
+```{python}
+#| label: fig-time-series
+#| fig-cap: "Youth deaths over time for selected countries (1990–2021)"
+
+countries_to_show = ["India", "Nigeria", "Brazil", "China", "Ethiopia"]
+
+ts_df = (
+    ind2_total
+    .filter(pl.col("country").is_in(countries_to_show))
+    .filter(pl.col("sex") == "Total")
+    .to_pandas()
+)
+
+(
+  ggplot(ts_df, aes(x="time_period", y="obs_value", color="country"))
+  + geom_line(size=1)
+  + geom_point(size=1.5)
+  + scale_y_continuous(labels=lambda l: [f"{v/1000:.0f}k" for v in l])
+  + scale_color_manual(values=["#185FA5","#D85A30","#1D9E75","#D4537E","#BA7517"])
+  + theme_minimal()
+  + theme(figure_size=(9, 5),
+          plot_title=element_text(size=12, weight="bold"),
+          legend_title=element_blank())
+  + labs(title="Youth Deaths Are Declining — But Unevenly",
+         x="Year", y="Deaths (ages 5–24)")
+)
+```
+
